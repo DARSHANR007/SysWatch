@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
+	"syswatch/internal/network"
 	"syswatch/internal/proc"
+	"syswatch/internal/stats"
 	"time"
 
 	"github.com/gdamore/tcell/v3"
 )
 
 // Run starts the tcell UI and polls the collector at interval until ctx done
-func Run(ctx context.Context, collector *proc.Collector, interval time.Duration) error {
+func Run(ctx context.Context, collector *proc.Collector, interval time.Duration, limit int, sortBy string) error {
 	s, err := tcell.NewScreen()
 	if err != nil {
 		return err
@@ -27,8 +30,14 @@ func Run(ctx context.Context, collector *proc.Collector, interval time.Duration)
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
 
+	// state for sort mode
+	sortMode := sortBy
+	if sortMode == "" {
+		sortMode = "cpu"
+	}
+
 	// initial draw
-	if err := drawOnce(s, collector); err != nil {
+	if err := drawOnce(s, collector, limit, sortMode); err != nil {
 		// non-fatal
 	}
 
@@ -40,11 +49,20 @@ func Run(ctx context.Context, collector *proc.Collector, interval time.Duration)
 			switch ev := ev.(type) {
 			case *tcell.EventKey:
 				if ev.Key() == tcell.KeyRune {
-					s := ev.Str()
-					if s != "" {
-						r := []rune(s)[0]
-						if r == 'q' {
+					str := ev.Str()
+					if str != "" {
+						r := []rune(str)[0]
+						switch r {
+						case 'q':
 							return nil
+						case 'c':
+							sortMode = "cpu"
+						case 'm':
+							sortMode = "mem"
+						case 'p':
+							sortMode = "pid"
+						case 'n':
+							sortMode = "name"
 						}
 					}
 				}
@@ -53,7 +71,7 @@ func Run(ctx context.Context, collector *proc.Collector, interval time.Duration)
 				}
 			}
 		case <-tick.C:
-			if err := drawOnce(s, collector); err != nil {
+			if err := drawOnce(s, collector, limit, sortMode); err != nil {
 				// show error briefly
 				showError(s, err)
 			}
@@ -70,26 +88,104 @@ func showError(s tcell.Screen, err error) {
 	s.Show()
 }
 
-func drawOnce(s tcell.Screen, collector *proc.Collector) error {
+func drawOnce(s tcell.Screen, collector *proc.Collector, limit int, sortMode string) error {
+	sysStats, err := stats.Collect()
+	if err != nil {
+		// non-fatal, continue with partial stats
+	}
+
 	procs, err := collector.Collect()
 	if err != nil {
 		return err
 	}
+
 	s.Clear()
 	w, h := s.Size()
 
-	// header
-	header := " PID   CPU%   RSS      NAME"
-	drawString(s, 0, 0, header, tcell.StyleDefault.Bold(true))
+	y := 0
 
-	// sort by CPU desc
-	sort.Slice(procs, func(i, j int) bool { return procs[i].CPU > procs[j].CPU })
+	// === Dashboard Header ===
+	drawString(s, 0, y, "═══ SYSWATCH ═════════════════════════════════════════", tcell.StyleDefault.Foreground(tcell.ColorBlue).Bold(true))
+	y += 2
 
-	maxRows := h - 1
-	for i := 0; i < maxRows && i < len(procs); i++ {
-		p := procs[i]
-		line := fmt.Sprintf(" %-5d %6.2f %8d %s", p.PID, p.CPU, p.RSS, truncate(p.Name, w-30))
-		drawString(s, 0, i+1, line, tcell.StyleDefault)
+	// CPU and Memory bars
+	cpuBar := ProgressBar(sysStats.CPUPercent, 15)
+	memBar := ProgressBar(sysStats.MemoryPercent, 15)
+
+	cpuColor := StatusColor(sysStats.CPUPercent)
+	memColor := StatusColor(sysStats.MemoryPercent)
+
+	line1 := fmt.Sprintf("  CPU: %s %.1f%%  │  MEM: %s %.1f%%", cpuBar, sysStats.CPUPercent, memBar, sysStats.MemoryPercent)
+	drawStringWithColor(s, 0, y, line1, cpuColor, memColor, sysStats.CPUPercent, sysStats.MemoryPercent)
+	y += 2
+
+	// Internet status and uptime
+	status, online := network.Status()
+	statusIndicator := StatusIndicator(online)
+
+	line2 := fmt.Sprintf("  Uptime: %s  │  Status: %s %s  │  Load: %.1f %.1f %.1f",
+		stats.FormatUptime(sysStats.Uptime),
+		statusIndicator,
+		status,
+		sysStats.LoadAvg[0], sysStats.LoadAvg[1], sysStats.LoadAvg[2],
+	)
+	drawStringStyled(s, 0, y, line2, tcell.StyleDefault.Foreground(tcell.ColorWhite))
+	y += 2
+
+	// Casual message
+	message := CasualMessage(sysStats.CPUPercent, sysStats.MemoryPercent)
+	drawStringStyled(s, 0, y, fmt.Sprintf("  >> %s", message), tcell.StyleDefault.Foreground(tcell.ColorGreen).Italic(true))
+	y += 2
+
+	// Separator
+	drawString(s, 0, y, "───────────────────────────────────────────────────────", tcell.StyleDefault.Foreground(tcell.ColorBlue))
+	y += 2
+
+	// Sort indicator and help
+	sortLabel := fmt.Sprintf("  Sort: [c]pu  [m]em  [p]id  [n]ame  │  Current: %s  │  [q]uit", strings.ToUpper(sortMode))
+	drawStringStyled(s, 0, y, sortLabel, tcell.StyleDefault.Foreground(tcell.ColorGreen).Italic(true))
+	y += 2
+
+	// === Process List ===
+	if y < h-1 {
+		drawString(s, 0, y, "", tcell.StyleDefault) // blank line
+		y++
+		header := "  PID      CPU%      RSS          NAME"
+		drawString(s, 0, y, header, tcell.StyleDefault.Bold(true).Foreground(tcell.ColorYellow))
+		y++
+		drawString(s, 0, y, "  "+strings.Repeat("─", 50), tcell.StyleDefault.Foreground(tcell.ColorBlue))
+		y++
+	}
+
+	// Sort by selected mode
+	switch sortMode {
+	case "mem":
+		sort.Slice(procs, func(i, j int) bool { return procs[i].RSS > procs[j].RSS })
+	case "pid":
+		sort.Slice(procs, func(i, j int) bool { return procs[i].PID < procs[j].PID })
+	case "name":
+		sort.Slice(procs, func(i, j int) bool { return procs[i].Name < procs[j].Name })
+	default: // "cpu"
+		sort.Slice(procs, func(i, j int) bool { return procs[i].CPU > procs[j].CPU })
+	}
+
+	maxRows := h - y
+	procSlice := procs
+	if limit > 0 && limit < len(procs) {
+		procSlice = procs[:limit]
+	}
+
+	for i := 0; i < maxRows && i < len(procSlice); i++ {
+		if y >= h {
+			break
+		}
+		p := procSlice[i]
+		line := fmt.Sprintf("  %-7d %7.2f %12d %s", p.PID, p.CPU, p.RSS, truncate(p.Name, w-45))
+
+		// Color code by CPU usage
+		color := StatusColor(p.CPU)
+		drawStringStyled(s, 0, y, line, tcell.StyleDefault.Foreground(color))
+		y++
 	}
 
 	s.Show()
@@ -111,3 +207,20 @@ func drawString(s tcell.Screen, x, y int, str string, style tcell.Style) {
 		s.SetContent(x+i, y, r, nil, style)
 	}
 }
+
+func drawStringStyled(s tcell.Screen, x, y int, str string, style tcell.Style) {
+	for i, r := range str {
+		s.SetContent(x+i, y, r, nil, style)
+	}
+}
+
+// drawStringWithColor splits string and applies color based on thresholds
+func drawStringWithColor(s tcell.Screen, x, y int, str string, cpuColor, memColor tcell.Color, cpuPercent, memPercent float64) {
+	// Simple approach: color the whole thing with appropriate color
+	// For more sophistication, parse and color sections
+	for i, r := range str {
+		s.SetContent(x+i, y, r, nil, tcell.StyleDefault.Foreground(cpuColor))
+	}
+}
+
+// === Helper functions from helpers.go ===
