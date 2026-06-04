@@ -1,0 +1,10 @@
+Package: syswatch
+Version: 1.0.0
+Architecture: amd64
+Maintainer: Darshan R <darsh@example.com>
+Homepage: https://github.com/DARSHANR007/SysWatch
+Description: Lightweight process monitor for Ubuntu
+ A minimal, fast system monitoring tool with a clean TUI.
+ Monitor CPU, memory, processes, and network status in real-time.
+ Similar to htop and procs but with a focus on simplicity and speed.
+Priority: optional

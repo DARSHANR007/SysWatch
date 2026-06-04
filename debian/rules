@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+override_dh_auto_build:
+	go build -o syswatch ./
+
+override_dh_auto_install:
+	mkdir -p debian/syswatch/usr/local/bin
+	install -m 755 syswatch debian/syswatch/usr/local/bin/

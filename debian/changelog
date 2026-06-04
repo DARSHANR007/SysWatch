@@ -1,0 +1,9 @@
+syswatch (1.0.0) jammy; urgency=medium
+
+  * Initial release
+  * Basic process monitoring with TUI
+  * System stats dashboard (CPU, memory, network)
+  * Sort by CPU, memory, PID, name
+  * Configurable refresh interval
+
+ -- Darshan R <darsh@example.com>  Wed, 04 Jun 2026 10:00:00 +0000
